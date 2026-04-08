@@ -1,6 +1,6 @@
 ﻿/**
  * BetterStatusIndicator
- * Version: 2.1.0
+ * Version: 2.1.1
  * Updated for Discord Mobile UI 2025-2026
  * Fixes DM list, Member list, Friends, and Profile for new component structure
  */
@@ -24,7 +24,7 @@ const { findInReactTree } = utilities;
 const createPatcher = patcher.create;
 
 const PLUGIN_NAME = "BetterStatusIndicator";
-const VERSION = "2.1.0";
+const VERSION = "2.1.1";
 
 // Utility functions
 const intToHex = (color) => "#" + ("000000" + color.toString(16)).slice(-6);
@@ -140,7 +140,7 @@ const Plugin = {
 
                 // Extract channel and user info
                 const channel = props?.channel || props?.item?.channel || props;
-                const user = props?.user || props?.item?.user || channel?.recipients?.[0];
+                const user = this.resolveUser(props?.user || props?.item?.user || channel?.recipients?.[0], channel);
 
                 // Only process DMs (type 1) that have a user
                 if (channel?.type !== 1 || !user?.id) return ret;
@@ -182,7 +182,7 @@ const Plugin = {
                     const channel = item.channel || item;
                     if (channel?.type !== 1) return element;
 
-                    const user = item.user || channel?.recipients?.[0];
+                    const user = this.resolveUser(item.user || channel?.recipients?.[0], channel);
                     if (!user?.id) return element;
                     this.injectDeviceTextNextToUsername(element, user, "dm-render");
 
@@ -210,7 +210,7 @@ const Plugin = {
             if (!Component?.default) continue;
 
             this.patcher.after(Component, "default", (_, [props], ret) => {
-                const user = props?.message?.author || props?.author || props?.user;
+                const user = this.resolveUser(props?.message?.author || props?.author || props?.user);
                 if (!user?.id) return ret;
                 this.injectDeviceTextNextToUsername(ret, user, "chat");
             });
@@ -380,8 +380,20 @@ const Plugin = {
     },
 
     getClientStatuses(userId) {
-        const PresenceStore = getByProps("getState", "clientStatuses");
-        return PresenceStore?.getState?.()?.clientStatuses?.[userId] || null;
+        const directStore = getByProps("getState", "clientStatuses");
+        const direct = directStore?.getState?.()?.clientStatuses?.[userId];
+        if (direct && typeof direct === "object") return direct;
+
+        const methodStore = getByProps("getClientStatus", "getStatus");
+        const viaMethod = methodStore?.getClientStatus?.(userId);
+        if (viaMethod && typeof viaMethod === "object") return viaMethod;
+
+        const allStore = getByProps("getAllClientStatuses");
+        const all = allStore?.getAllClientStatuses?.();
+        const viaAll = all?.[userId];
+        if (viaAll && typeof viaAll === "object") return viaAll;
+
+        return null;
     },
 
     getDeviceLabels(userId, isBot = false) {
@@ -445,6 +457,26 @@ const Plugin = {
 
         if (nameTextNode?.props && typeof nameTextNode.props.children === "string") {
             nameTextNode.props.children = `${nameTextNode.props.children}${suffix}`;
+            return true;
+        }
+
+        const arrayTextNode = findInReactTree(tree, (node) => {
+            const children = node?.props?.children;
+            if (!Array.isArray(children)) return false;
+            return children.some((c) =>
+                typeof c === "string" &&
+                !c.includes(" - ") &&
+                possibleNames.some((name) => c === name || c.startsWith(`${name} `))
+            );
+        });
+
+        if (arrayTextNode?.props && Array.isArray(arrayTextNode.props.children)) {
+            arrayTextNode.props.children = arrayTextNode.props.children.map((child) => {
+                if (typeof child !== "string") return child;
+                if (child.includes(" - ")) return child;
+                if (!possibleNames.some((name) => child === name || child.startsWith(`${name} `))) return child;
+                return `${child}${suffix}`;
+            });
             return true;
         }
 
@@ -662,3 +694,25 @@ const Plugin = {
 
 registerPlugin(Plugin);
 
+    getUserStore() {
+        return getByProps("getUser", "getCurrentUser");
+    },
+
+    resolveUser(rawUserOrId, channel) {
+        const UserStore = this.getUserStore();
+        if (!rawUserOrId && channel?.recipients?.length) {
+            const currentId = UserStore?.getCurrentUser?.()?.id;
+            const targetRecipientId = channel.recipients.find((id) => id && id !== currentId) || channel.recipients[0];
+            return UserStore?.getUser?.(targetRecipientId) || (targetRecipientId ? { id: targetRecipientId } : null);
+        }
+
+        if (typeof rawUserOrId === "string") {
+            return UserStore?.getUser?.(rawUserOrId) || { id: rawUserOrId };
+        }
+
+        if (rawUserOrId?.id) {
+            return rawUserOrId;
+        }
+
+        return null;
+    },
