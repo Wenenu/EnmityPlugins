@@ -1,6 +1,6 @@
 ﻿/**
  * BetterStatusIndicator
- * Version: 2.1.1
+ * Version: 2.2.0
  * Updated for Discord Mobile UI 2025-2026
  * Fixes DM list, Member list, Friends, and Profile for new component structure
  */
@@ -24,7 +24,7 @@ const { findInReactTree } = utilities;
 const createPatcher = patcher.create;
 
 const PLUGIN_NAME = "BetterStatusIndicator";
-const VERSION = "2.1.1";
+const VERSION = "2.2.0";
 
 // Utility functions
 const intToHex = (color) => "#" + ("000000" + color.toString(16)).slice(-6);
@@ -56,7 +56,9 @@ const PLATFORM_ICONS = {
     desktop: getIDByName("ic_monitor_24px") || getIDByName("screen") || getIDByName("desktop"),
     mobile: getIDByName("ic_mobile_status") || getIDByName("mobile") || getIDByName("phone"),
     web: getIDByName("ic_public") || getIDByName("globe") || getIDByName("web"),
-    bot: getIDByName("ic_robot_24px") || getIDByName("bot") || getIDByName("robot")
+    bot: getIDByName("ic_robot_24px") || getIDByName("bot") || getIDByName("robot"),
+    console: getIDByName("ic_game_controller") || getIDByName("controller") || getIDByName("gamepad"),
+    other: getIDByName("ic_help_24px") || getIDByName("help")
 };
 
 const Plugin = {
@@ -365,6 +367,26 @@ const Plugin = {
         }
     },
 
+    getUserStore() {
+        return getByProps("getUser", "getCurrentUser");
+    },
+
+    resolveUser(rawUserOrId, channel) {
+        const UserStore = this.getUserStore();
+        if (!rawUserOrId && channel?.recipients?.length) {
+            const currentId = UserStore?.getCurrentUser?.()?.id;
+            const targetRecipientId = channel.recipients.find((id) => id && id !== currentId) || channel.recipients[0];
+            return UserStore?.getUser?.(targetRecipientId) || (targetRecipientId ? { id: targetRecipientId } : null);
+        }
+
+        if (typeof rawUserOrId === "string") {
+            return UserStore?.getUser?.(rawUserOrId) || { id: rawUserOrId };
+        }
+
+        if (rawUserOrId?.id) return rawUserOrId;
+        return null;
+    },
+
     // Patch 6: Mobile status indicator color
     patchMobileStatus() {
         const PresenceStore = getByProps("isMobileOnline", "getState");
@@ -396,51 +418,93 @@ const Plugin = {
         return null;
     },
 
-    getDeviceLabels(userId, isBot = false) {
+    normalizePlatform(rawKey) {
+        const key = String(rawKey || "").toLowerCase();
+        if (!key) return null;
+        if (key.includes("desktop") || key.includes("pc") || key.includes("windows") || key.includes("linux") || key.includes("mac")) return "desktop";
+        if (key.includes("mobile") || key.includes("phone") || key.includes("ios") || key.includes("android")) return "mobile";
+        if (key.includes("web") || key.includes("browser")) return "web";
+        if (key.includes("console") || key.includes("xbox") || key.includes("playstation") || key.includes("ps") || key.includes("switch") || key.includes("nintendo") || key.includes("embedded")) return "console";
+        if (key.includes("vr")) return "other";
+        return "other";
+    },
+
+    getPlatformEntries(userId, isBot = false) {
         const statuses = this.getClientStatuses(userId);
         if (!statuses && !isBot) return [];
 
-        const known = [];
-        const other = [];
-        const entries = Object.keys(statuses || {});
-
-        if (isBot) known.push("Bot");
-
-        for (const rawKey of entries) {
-            const key = String(rawKey || "").toLowerCase();
-            if (!key) continue;
-
-            if (key.includes("desktop") || key.includes("pc") || key.includes("windows") || key.includes("linux") || key.includes("mac")) {
-                known.push("PC");
-                continue;
-            }
-            if (key.includes("mobile") || key.includes("phone") || key.includes("ios") || key.includes("android")) {
-                known.push("Mobile");
-                continue;
-            }
-            if (key.includes("console") || key.includes("xbox") || key.includes("playstation") || key.includes("ps") || key.includes("switch") || key.includes("nintendo") || key.includes("embedded")) {
-                known.push("Console");
-                continue;
-            }
-            if (key.includes("web") || key.includes("browser")) {
-                known.push("Web");
-                continue;
-            }
-
-            other.push("Other");
+        const byPlatform = {};
+        const entries = Object.entries(statuses || {});
+        for (const [rawPlatform, status] of entries) {
+            const platform = this.normalizePlatform(rawPlatform);
+            if (!platform) continue;
+            byPlatform[platform] = typeof status === "string" ? status : "online";
         }
 
-        const deduped = [...new Set(known.concat(other))];
-        return deduped;
+        if (isBot && !byPlatform.web) byPlatform.web = "online";
+
+        return Object.entries(byPlatform).map(([platform, status]) => ({ platform, status }));
+    },
+
+    getDeviceLabels(userId, isBot = false) {
+        const labelMap = {
+            desktop: "PC",
+            mobile: "Mobile",
+            web: "Web",
+            console: "Console",
+            other: "Other"
+        };
+        return this.getPlatformEntries(userId, isBot).map(({ platform }) => labelMap[platform] || "Other");
+    },
+
+    createInlinePlatformIndicators(userId, isBot = false, marker = "default") {
+        const entries = this.getPlatformEntries(userId, isBot);
+        if (!entries.length) return null;
+
+        const colors = this.getColors();
+        const icons = entries.map(({ platform, status }) => {
+            const iconSource = PLATFORM_ICONS[platform] || PLATFORM_ICONS.other;
+            if (!iconSource) return null;
+            return React.createElement(Image, {
+                key: `bsi-platform-${userId}-${platform}`,
+                source: iconSource,
+                style: {
+                    width: platform === "mobile" ? 12 : 13,
+                    height: platform === "mobile" ? 12 : 13,
+                    marginLeft: 3,
+                    tintColor: getStatusColor(status, colors)
+                }
+            });
+        }).filter(Boolean);
+
+        if (!icons.length) return null;
+
+        return React.createElement(View, {
+            key: `bsi-device-indicators-${marker}-${userId}`,
+            style: {
+                flexDirection: "row",
+                alignItems: "center",
+                marginLeft: 4
+            }
+        }, ...icons);
+    },
+
+    nodeHasPossibleName(node, possibleNames) {
+        if (!node) return false;
+        if (typeof node === "string") {
+            return possibleNames.some((name) => node === name || node.startsWith(`${name} `));
+        }
+        if (Array.isArray(node)) {
+            return node.some((entry) => this.nodeHasPossibleName(entry, possibleNames));
+        }
+        return this.nodeHasPossibleName(node?.props?.children, possibleNames);
     },
 
     injectDeviceTextNextToUsername(tree, user, context = "default") {
         if (!tree || !user?.id) return false;
 
-        const labels = this.getDeviceLabels(user.id, user.bot);
-        if (!labels.length) return false;
-
-        const suffix = ` - ${labels.join(", ")}`;
+        const indicators = this.createInlinePlatformIndicators(user.id, user.bot, context);
+        if (!indicators) return false;
         const possibleNames = [
             user.globalName,
             user.displayName,
@@ -448,59 +512,20 @@ const Plugin = {
             user.nick
         ].filter(Boolean);
 
-        const nameTextNode = findInReactTree(tree, (node) => {
-            const child = node?.props?.children;
-            if (typeof child !== "string") return false;
-            if (child.includes(" - ")) return false;
-            return possibleNames.some((name) => child === name || child.startsWith(`${name} `));
-        });
-
-        if (nameTextNode?.props && typeof nameTextNode.props.children === "string") {
-            nameTextNode.props.children = `${nameTextNode.props.children}${suffix}`;
-            return true;
-        }
-
-        const arrayTextNode = findInReactTree(tree, (node) => {
+        const row = findInReactTree(tree, (node) => {
+            if (node?.props?.style?.flexDirection !== "row") return false;
             const children = node?.props?.children;
             if (!Array.isArray(children)) return false;
-            return children.some((c) =>
-                typeof c === "string" &&
-                !c.includes(" - ") &&
-                possibleNames.some((name) => c === name || c.startsWith(`${name} `))
-            );
+            return this.nodeHasPossibleName(children, possibleNames);
         });
-
-        if (arrayTextNode?.props && Array.isArray(arrayTextNode.props.children)) {
-            arrayTextNode.props.children = arrayTextNode.props.children.map((child) => {
-                if (typeof child !== "string") return child;
-                if (child.includes(" - ")) return child;
-                if (!possibleNames.some((name) => child === name || child.startsWith(`${name} `))) return child;
-                return `${child}${suffix}`;
-            });
-            return true;
-        }
-
-        const row = findInReactTree(tree, (node) =>
-            node?.props?.style?.flexDirection === "row" &&
-            Array.isArray(node?.props?.children)
-        );
 
         if (!row?.props?.children) return false;
 
-        const marker = `bsi-device-labels-${context}-${user.id}`;
+        const marker = `bsi-device-indicators-${context}-${user.id}`;
         const hasMarker = row.props.children.some((child) => child?.key === marker);
         if (hasMarker) return true;
 
-        row.props.children.push(
-            React.createElement(Text, {
-                key: marker,
-                style: {
-                    color: Constants.ThemeColorMap?.TEXT_MUTED || Constants.ThemeColorMap?.TEXT_NORMAL || "#aaa",
-                    fontSize: 12,
-                    marginLeft: 6
-                }
-            }, labels.join(", "))
-        );
+        row.props.children.push(indicators);
         return true;
     },
 
@@ -693,26 +718,3 @@ const Plugin = {
 };
 
 registerPlugin(Plugin);
-
-    getUserStore() {
-        return getByProps("getUser", "getCurrentUser");
-    },
-
-    resolveUser(rawUserOrId, channel) {
-        const UserStore = this.getUserStore();
-        if (!rawUserOrId && channel?.recipients?.length) {
-            const currentId = UserStore?.getCurrentUser?.()?.id;
-            const targetRecipientId = channel.recipients.find((id) => id && id !== currentId) || channel.recipients[0];
-            return UserStore?.getUser?.(targetRecipientId) || (targetRecipientId ? { id: targetRecipientId } : null);
-        }
-
-        if (typeof rawUserOrId === "string") {
-            return UserStore?.getUser?.(rawUserOrId) || { id: rawUserOrId };
-        }
-
-        if (rawUserOrId?.id) {
-            return rawUserOrId;
-        }
-
-        return null;
-    },
